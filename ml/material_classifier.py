@@ -1,4 +1,3 @@
-# import joblib
 import numpy as np
 import pandas as pd
 import joblib
@@ -6,60 +5,112 @@ from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 from pathlib import Path
 
+"""
+Industry-style retraining using weak supervision.
+Schema locked to inference.
+"""
 
 # ======================
-# TRAINING DATA (dummy MVP data)
+# BUILD TRAINING DATA
 # ======================
 
-data = [
-    ["wall", 0.25, 3.0, 10.0, "concrete"],
-    ["wall", 0.10, 2.5, 8.0, "gypsum"],
-    ["floor", 0.20, 0.2, 50.0, "tile"],
-    ["floor", 0.20, 0.2, 60.0, "marble"],
-    ["window", 0.05, 1.2, 2.0, "glass"],
-    ["door", 0.10, 2.2, 2.0, "wood"],
-]
+data = []
 
-df = pd.DataFrame(data, columns=["layer", "thickness", "height", "area", "material"])
+# ---- Exterior concrete walls ----
+for _ in range(120):
+    data.append({
+        "length": np.random.uniform(2.0, 6.0),
+        "thickness": np.random.uniform(0.22, 0.35),
+        "height": 3.0,
+        "orientation": np.random.choice(["horizontal", "vertical"]),
+        "is_exterior": 1,
+        "material": "concrete"
+    })
 
+# ---- Interior gypsum walls ----
+for _ in range(100):
+    data.append({
+        "length": np.random.uniform(0.5, 3.0),
+        "thickness": np.random.uniform(0.08, 0.15),
+        "height": 3.0,
+        "orientation": np.random.choice(["horizontal", "vertical"]),
+        "is_exterior": 0,
+        "material": "gypsum"
+    })
+
+# ---- Bathroom / kitchen tiles ----
+for _ in range(60):
+    data.append({
+        "length": np.random.uniform(1.0, 3.0),
+        "thickness": np.random.uniform(0.15, 0.25),
+        "height": 3.0,
+        "orientation": np.random.choice(["horizontal", "vertical"]),
+        "is_exterior": 0,
+        "material": "tile"
+    })
+
+# ---- Windows ----
+for _ in range(40):
+    data.append({
+        "length": np.random.uniform(0.8, 2.0),
+        "thickness": 0.05,
+        "height": 1.2,
+        "orientation": np.random.choice(["horizontal", "vertical"]),
+        "is_exterior": 1,
+        "material": "glass"
+    })
+
+df = pd.DataFrame(data)
+print(f"📊 Training samples: {len(df)}")
 
 # ======================
 # ENCODERS
 # ======================
 
-layer_encoder = LabelEncoder()
+orientation_encoder = LabelEncoder()
 material_encoder = LabelEncoder()
 
-df["layer_enc"] = layer_encoder.fit_transform(df["layer"])
+df["orientation_enc"] = orientation_encoder.fit_transform(df["orientation"])
 df["material_enc"] = material_encoder.fit_transform(df["material"])
 
-X = df[["thickness", "height", "area", "layer_enc"]].values
-y = df["material_enc"].values
+# ======================
+# FEATURE MATRIX (5 FEATURES)
+# ======================
 
+X = df[[
+    "length",
+    "thickness",
+    "height",
+    "orientation_enc",
+    "is_exterior"
+]].values
+
+y = df["material_enc"].values
 
 # ======================
 # TRAIN MODEL
 # ======================
 
 model = XGBClassifier(
-    n_estimators=50,
-    max_depth=3,
-    learning_rate=0.1,
-    use_label_encoder=False,
+    n_estimators=150,
+    max_depth=5,
+    learning_rate=0.05,
+    subsample=0.9,
+    colsample_bytree=0.9,
     eval_metric="mlogloss"
 )
 
 model.fit(X, y)
-
+print("🧠 Model trained successfully")
 
 # ======================
-# SAVE FILES USING JOBLIB
+# SAVE ARTIFACTS
 # ======================
 
 Path("ml").mkdir(exist_ok=True)
 
 joblib.dump(model, "ml/material_model.pkl")
-joblib.dump(layer_encoder, "ml/layer_encoder.pkl")
+joblib.dump(orientation_encoder, "ml/orientation_encoder.pkl")
 joblib.dump(material_encoder, "ml/material_encoder.pkl")
 
-print("✅ Model and encoders saved successfully.")
+print("✅ New model & encoders saved")

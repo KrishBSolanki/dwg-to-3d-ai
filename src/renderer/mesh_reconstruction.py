@@ -77,226 +77,208 @@
 # src/renderer/mesh_reconstruction.py
 import trimesh
 from trimesh.visual.material import PBRMaterial
+from shapely.geometry import LineString, Polygon, MultiPolygon
+from shapely.ops import unary_union, polygonize
+from pathlib import Path
 from PIL import Image
 import numpy as np
-from shapely.geometry import Polygon, LineString
-from shapely.ops import unary_union, polygonize
+
 from ml.material_predictor import predict_material
 from ml.feature_extractor import extract_wall_features
-
-
-
 
 # ======================
 # PARAMETERS
 # ======================
 
-FLOOR_STEP = 3.2
+UNIT_SCALE = 0.001
+FLOOR_HEIGHT = 0.3
+WALL_HEIGHT = 3.0
+WALL_THICKNESS = 0.25
+
+DOOR_HEIGHT = 2.1
 WINDOW_HEIGHT = 1.2
 WINDOW_BASE = 1.0
-ROOM_HEIGHT = 0.05
 
-WALL_THICKNESS = 0.25
-DEFAULT_WALL_HEIGHT = 3.0
-
+TEXTURE_DIR = Path("assets/textures")
 
 # ======================
-# TEXTURE MAP (PBR)
+# PBR MATERIAL CACHE
 # ======================
 
-TEXTURE_MAP = {
-    "concrete": "assets/textures/concrete.jpg",
-    "gypsum": "assets/textures/gypsum.jpg",
-    "glass": "assets/textures/glass.png",
-    "marble": "assets/textures/marble.jpg",
-    "tile": "assets/textures/tile.jpg",
-}
+_MATERIAL_CACHE = {}
 
 
-# ======================
-# WALL HEIGHT LOGIC
-# ======================
+def load_texture(name):
+    img = Image.open(TEXTURE_DIR / name).convert("RGBA")
+    return np.array(img)
 
-def get_wall_height_from_layer(layer: str):
-    layer = layer.lower()
-    if "full" in layer:
-        return 3.0
-    elif "head" in layer:
-        return 1.2
-    elif "partition" in layer:
-        return 2.5
-    elif "half" in layer:
-        return 1.5
+
+def get_pbr_material(material_name):
+    """
+    Create or reuse a PBR material for a semantic class.
+    """
+
+    if material_name in _MATERIAL_CACHE:
+        return _MATERIAL_CACHE[material_name]
+
+    if material_name == "concrete":
+        material = PBRMaterial(
+            baseColorTexture=load_texture("concrete.jpg"),
+            metallicFactor=0.0,
+            roughnessFactor=0.9
+        )
+
+    elif material_name == "gypsum":
+        material = PBRMaterial(
+            baseColorTexture=load_texture("gypsum.jpg"),
+            metallicFactor=0.0,
+            roughnessFactor=0.8
+        )
+
+    elif material_name == "tile":
+        material = PBRMaterial(
+            baseColorTexture=load_texture("tile.jpg"),
+            metallicFactor=0.0,
+            roughnessFactor=0.6
+        )
+
+    elif material_name == "glass":
+        material = PBRMaterial(
+            baseColorTexture=load_texture("glass.png"),
+            metallicFactor=0.0,
+            roughnessFactor=0.1,
+            alphaMode="BLEND"
+        )
+
     else:
-        return DEFAULT_WALL_HEIGHT
+        material = PBRMaterial(
+            baseColorFactor=[0.8, 0.8, 0.8, 1.0],
+            metallicFactor=0.0,
+            roughnessFactor=0.8
+        )
+
+    _MATERIAL_CACHE[material_name] = material
+    print(f"🎨 PBR material created: {material_name}")
+    return material
 
 
 # ======================
-# ROOM CLASSIFICATION
+# UTILS
 # ======================
 
-def classify_room(room_poly: Polygon):
-    area = room_poly.area
-    minx, miny, maxx, maxy = room_poly.bounds
-    w = maxx - minx
-    h = maxy - miny
-    aspect_ratio = max(w, h) / max(0.01, min(w, h))
+def scale_coords(coords):
+    return [(x * UNIT_SCALE, y * UNIT_SCALE) for x, y in coords]
 
-    if aspect_ratio > 4:
-        return "corridor"
-    elif area < 6:
-        return "bathroom"
-    elif area < 12:
-        return "kitchen"
-    elif area < 25:
-        return "bedroom"
-    else:
-        return "living_room"
+
+def center_mesh(mesh):
+    mesh.apply_translation(-mesh.centroid)
+    return mesh
+
+
+def extrude(poly, height):
+    return trimesh.creation.extrude_polygon(poly, height)
+
+
+def buffer_centerline(line):
+    return line.buffer(
+        WALL_THICKNESS / 2,
+        cap_style=3,
+        join_style=2
+    )
 
 
 # ======================
-# ROOM DETECTION FROM WALLS
+# ROOM DETECTION
 # ======================
 
 def detect_rooms_from_walls(walls):
-    lines = []
-
-    for wall in walls:
-        try:
-            lines.append(LineString(wall["points"]))
-        except:
-            continue
-
+    lines = [LineString(w["points"]) for w in walls if len(w["points"]) >= 2]
     merged = unary_union(lines)
 
     rooms = []
     for poly in polygonize(merged):
-        if poly.area > 5:
+        if poly.is_valid and poly.area > 5:
             rooms.append(poly)
 
+    print(f"🏠 Rooms polygonized: {len(rooms)}")
     return rooms
 
 
 # ======================
-# PBR TEXTURE FUNCTION
+# MAIN BUILDER
 # ======================
 
-def apply_pbr_texture(mesh, material_name):
-    texture_path = TEXTURE_MAP.get(material_name)
+def build_mesh(geometry, output_path):
+    print("🏗️ Starting mesh reconstruction (PBR-enabled)...")
 
-    if texture_path is None:
-        return mesh
-
-    image = Image.open(texture_path).convert("RGBA")
-    image_np = np.array(image)
-
-    material = PBRMaterial(
-        baseColorTexture=image_np,
-        metallicFactor=0.0,
-        roughnessFactor=0.8
-    )
-
-    mesh.visual.material = material
-    return mesh
-
-
-# ======================
-# MAIN FUNCTION
-# ======================
-
-def build_mesh(geometry, output_path, floor_index=0):
     meshes = []
-    z_offset = floor_index * FLOOR_STEP
 
-    # ------------------
-    # ROOM DETECTION
-    # ------------------
-    room_polys = detect_rooms_from_walls(geometry["walls"])
-    print(f"✅ Rooms detected: {len(room_polys)}")
+    # -------------------------
+    # FLOOR SLAB
+    # -------------------------
+    raw_rooms = detect_rooms_from_walls(geometry["walls"])
+    rooms = [Polygon(scale_coords(r.exterior.coords)) for r in raw_rooms]
 
-    # ------------------
-    # WALLS (ML MATERIAL CLASSIFICATION)
-    # ------------------
+    unioned = unary_union(rooms)
+    if isinstance(unioned, MultiPolygon):
+        unioned = max(unioned.geoms, key=lambda p: p.area)
+
+    floor_mesh = extrude(unioned, FLOOR_HEIGHT)
+    floor_mesh.visual.material = get_pbr_material("tile")
+    meshes.append(floor_mesh)
+
+    print("🧱 Floor slab created")
+
+    # -------------------------
+    # WALL CENTERLINES
+    # -------------------------
+    wall_lines = []
+    for wall in geometry["walls"]:
+        pts = scale_coords(wall["points"])
+        if len(pts) >= 2:
+            wall_lines.append(LineString(pts))
+
+    merged_lines = unary_union(wall_lines)
+    if isinstance(merged_lines, LineString):
+        merged_lines = [merged_lines]
+    else:
+        merged_lines = list(merged_lines.geoms)
+
+    print(f"🧱 Continuous wall centerlines: {len(merged_lines)}")
+
     wall_meshes = []
 
-    for wall in geometry["walls"]:
-        pts = wall["points"]
-        layer = wall["layer"]
+    for line in merged_lines:
+        poly = buffer_centerline(line)
+        if not poly.is_valid:
+            continue
 
-        try:
-            line = LineString(pts)
-            poly = line.buffer(WALL_THICKNESS)
+        # -------- AI FEATURE EXTRACTION --------
+        features = extract_wall_features(
+            poly,
+            WALL_HEIGHT,
+            layer="a-wall"
+        )
 
-            if not poly.is_valid or poly.area < 0.1:
-                continue
+        material_name = predict_material(features)
+        material = get_pbr_material(material_name)
 
-            wall_height = get_wall_height_from_layer(layer)
+        wall_mesh = extrude(poly, WALL_HEIGHT)
+        wall_mesh.visual.material = material
+        wall_meshes.append(wall_mesh)
 
-            # --- Extract ML features ---
-            features = extract_wall_features(poly, wall_height, layer)
+    print("🎨 Wall materials applied")
 
-            # --- Predict material using XGBoost ---
-            material = predict_material(features)
-            print(f"🧠 Wall material predicted: {material}")
+    walls_combined = trimesh.util.concatenate(wall_meshes)
+    meshes.append(walls_combined)
 
-            # --- Create mesh ---
-            mesh = trimesh.creation.extrude_polygon(poly, height=wall_height)
-            mesh.apply_translation((0, 0, z_offset))
-
-            # --- Apply PBR texture ---
-            mesh = apply_pbr_texture(mesh, material)
-
-            wall_meshes.append(mesh)
-
-        except Exception as e:
-            print("Wall error:", e)
-
-    if not wall_meshes:
-        raise ValueError("No wall meshes generated")
-
-    wall_mesh = trimesh.util.concatenate(wall_meshes)
-    meshes.append(wall_mesh)
-
-    # ------------------
-    # WINDOWS (glass PBR)
-    # ------------------
-    for win in geometry.get("windows", []):
-        try:
-            line = LineString(win)
-            poly = line.buffer(WALL_THICKNESS)
-
-            win_mesh = trimesh.creation.extrude_polygon(poly, height=WINDOW_HEIGHT)
-            win_mesh.apply_translation((0, 0, z_offset + WINDOW_BASE))
-
-            win_mesh = apply_pbr_texture(win_mesh, "glass")
-
-            meshes.append(win_mesh)
-
-        except Exception as e:
-            print("Window error:", e)
-
-    # ------------------
-    # ROOMS (floor texture)
-    # ------------------
-    for room in room_polys:
-        room_type = classify_room(room)
-        print(f"🧠 Room classified as: {room_type}")
-
-        room_mesh = trimesh.creation.extrude_polygon(room, height=ROOM_HEIGHT)
-        room_mesh.apply_translation((0, 0, z_offset + 0.01))
-
-        # Assign floor texture (tile for now)
-        room_mesh = apply_pbr_texture(room_mesh, "tile")
-
-        meshes.append(room_mesh)
-
-    # ------------------
-    # FINAL MESH
-    # ------------------
+    # -------------------------
+    # FINAL EXPORT
+    # -------------------------
     final_mesh = trimesh.util.concatenate(meshes)
-    final_mesh.apply_translation(-final_mesh.centroid)
+    final_mesh = center_mesh(final_mesh)
 
     glb_path = output_path.with_suffix(".glb")
     final_mesh.export(glb_path)
 
-    print("✅ GLB exported:", glb_path)
+    print("🎉 GLB exported with PBR materials:", glb_path)
