@@ -14,10 +14,11 @@
 #     y_pred = model.predict(df)[0]
 #     material = material_encoder.inverse_transform([y_pred])[0]
 
-#     return material
-import joblib
+#     return materialimport joblib
 import numpy as np
 from pathlib import Path
+import joblib
+
 
 # ======================
 # LOAD MODEL & ENCODERS
@@ -33,44 +34,44 @@ print("🧠 Material ML model & encoders loaded")
 
 
 # ======================
-# RULE-BASED OVERRIDES
+# RULE CONFIDENCE SYSTEM
 # ======================
 
-def apply_material_rules(features: dict):
+def rule_candidates(features: dict):
     """
-    Deterministic architectural rules.
-    Returns material string or None if ML should decide.
+    Return (material, confidence) pairs instead of hard overrides.
+    Confidence ∈ [0, 1].
     """
 
-    # -------------------------
-    # GLASS (FORCED)
-    # -------------------------
+    candidates = []
+
     layer = features.get("layer", "")
-    if "glaz" in layer or "glass" in layer:
-        return "glass"
 
     # -------------------------
-    # EXTERIOR STRUCTURAL WALLS
+    # GLASS (VERY STRONG)
+    # -------------------------
+    if "glaz" in layer or "glass" in layer:
+        candidates.append(("glass", 0.95))
+
+    # -------------------------
+    # EXTERIOR WALLS (STRONG)
     # -------------------------
     if features.get("is_exterior") == 1:
-        return "concrete"
+        candidates.append(("concrete", 0.75))
 
     # -------------------------
-    # WET AREAS
+    # WET AREAS (MEDIUM)
     # -------------------------
-    if features.get("adj_bathroom") == 1:
-        return "tile"
-
-    if features.get("adj_kitchen") == 1:
-        return "tile"
+    if features.get("adj_bathroom") == 1 or features.get("adj_kitchen") == 1:
+        candidates.append(("tile", 0.65))
 
     # -------------------------
-    # THIN INTERIOR PARTITIONS
+    # THIN PARTITIONS (MEDIUM)
     # -------------------------
-    if features.get("thickness", 0) < 0.15:
-        return "gypsum"
+    if features.get("thickness", 0) < 0.18:
+        candidates.append(("gypsum", 0.6))
 
-    return None
+    return candidates
 
 
 # ======================
@@ -79,59 +80,64 @@ def apply_material_rules(features: dict):
 
 def predict_material(features: dict):
     """
-    Hybrid material prediction:
-    1️⃣ Rule-based architectural logic
-    2️⃣ ML model fallback (XGBoost)
+    Production-grade hybrid material prediction.
 
-    Expected features:
-    {
-        length: float,
-        thickness: float,
-        height: float,
-        orientation: "horizontal" | "vertical",
-        is_exterior: 0 | 1,
-        layer: str (optional, for rules)
-    }
+    Decision order:
+    1️⃣ Strong rule (confidence ≥ 0.9)
+    2️⃣ ML prediction
+    3️⃣ Medium rule arbitration
+    4️⃣ Safe fallback
     """
 
     # -------------------------
-    # RULE PASS
+    # RULE CANDIDATES
     # -------------------------
-    rule_material = apply_material_rules(features)
-    if rule_material:
-        print(f"🧠 Rule-based material: {rule_material}")
-        return rule_material
+    candidates = rule_candidates(features)
 
-    # -------------------------
-    # ENCODE ORIENTATION
-    # -------------------------
-    orientation = features.get("orientation", "horizontal")
-
-    if orientation in orientation_encoder.classes_:
-        orientation_enc = orientation_encoder.transform([orientation])[0]
-    else:
-        orientation_enc = 0
-
-    # -------------------------
-    # BUILD FEATURE VECTOR (⚠️ EXACTLY 5 FEATURES)
-    # -------------------------
-    X = np.array([[
-        features.get("length", 0.0),
-        features.get("thickness", 0.0),
-        features.get("height", 0.0),
-        orientation_enc,
-        features.get("is_exterior", 0)
-    ]])
+    for material, conf in candidates:
+        if conf >= 0.9:
+            print(f"🧠 Strong rule material: {material}")
+            return material
 
     # -------------------------
     # ML PREDICTION
     # -------------------------
     try:
+        orientation = features.get("orientation", "horizontal")
+        if orientation in orientation_encoder.classes_:
+            orientation_enc = orientation_encoder.transform([orientation])[0]
+        else:
+            orientation_enc = 0
+
+        X = np.array([[
+            features.get("length", 0.0),
+            features.get("thickness", 0.0),
+            features.get("height", 0.0),
+            orientation_enc,
+            features.get("is_exterior", 0)
+        ]])
+
         pred = model.predict(X)[0]
-        material = material_encoder.inverse_transform([pred])[0]
-        print(f"🧠 ML-based material: {material}")
-        return material
+        ml_material = material_encoder.inverse_transform([pred])[0]
+        print(f"🧠 ML-based material: {ml_material}")
 
     except Exception as e:
-        print(f"❌ ML prediction failed, fallback to concrete: {e}")
+        print(f"❌ ML failed ({e}), fallback to concrete")
         return "concrete"
+
+    # -------------------------
+    # ARBITRATION (SMART PART)
+    # -------------------------
+    if candidates:
+        # pick highest-confidence rule
+        rule_material, rule_conf = max(candidates, key=lambda x: x[1])
+
+        if rule_conf >= 0.7:
+            print(f"🧠 Rule-preferred material: {rule_material}")
+            return rule_material
+
+    # -------------------------
+    # DEFAULT TO ML
+    # -------------------------
+    return ml_material
+

@@ -75,16 +75,19 @@
 
 #     return output_path
 # src/renderer/mesh_reconstruction.py
+# src/renderer/mesh_reconstruction.py
+
 import trimesh
 from trimesh.visual.material import PBRMaterial
 from shapely.geometry import LineString, Polygon, MultiPolygon
-from shapely.ops import unary_union, polygonize
+from shapely.ops import unary_union, polygonize, transform
 from pathlib import Path
 from PIL import Image
 import numpy as np
 
 from ml.material_predictor import predict_material
 from ml.feature_extractor import extract_wall_features
+
 
 # ======================
 # PARAMETERS
@@ -101,8 +104,9 @@ WINDOW_BASE = 1.0
 
 TEXTURE_DIR = Path("assets/textures")
 
+
 # ======================
-# PBR MATERIAL CACHE
+# MATERIAL CACHE
 # ======================
 
 _MATERIAL_CACHE = {}
@@ -114,10 +118,6 @@ def load_texture(name):
 
 
 def get_pbr_material(material_name):
-    """
-    Create or reuse a PBR material for a semantic class.
-    """
-
     if material_name in _MATERIAL_CACHE:
         return _MATERIAL_CACHE[material_name]
 
@@ -127,21 +127,18 @@ def get_pbr_material(material_name):
             metallicFactor=0.0,
             roughnessFactor=0.9
         )
-
     elif material_name == "gypsum":
         material = PBRMaterial(
             baseColorTexture=load_texture("gypsum.jpg"),
             metallicFactor=0.0,
             roughnessFactor=0.8
         )
-
     elif material_name == "tile":
         material = PBRMaterial(
             baseColorTexture=load_texture("tile.jpg"),
             metallicFactor=0.0,
             roughnessFactor=0.6
         )
-
     elif material_name == "glass":
         material = PBRMaterial(
             baseColorTexture=load_texture("glass.png"),
@@ -149,7 +146,6 @@ def get_pbr_material(material_name):
             roughnessFactor=0.1,
             alphaMode="BLEND"
         )
-
     else:
         material = PBRMaterial(
             baseColorFactor=[0.8, 0.8, 0.8, 1.0],
@@ -163,11 +159,17 @@ def get_pbr_material(material_name):
 
 
 # ======================
-# UTILS
+# GEOMETRY UTILS
 # ======================
 
 def scale_coords(coords):
     return [(x * UNIT_SCALE, y * UNIT_SCALE) for x, y in coords]
+
+
+def force_2d(geom):
+    if geom is None or geom.is_empty:
+        return None
+    return transform(lambda x, y, *z: (x, y), geom)
 
 
 def center_mesh(mesh):
@@ -176,14 +178,15 @@ def center_mesh(mesh):
 
 
 def extrude(poly, height):
-    return trimesh.creation.extrude_polygon(poly, height)
+    return trimesh.creation.extrude_polygon(poly, height, engine="earcut")
 
 
-def buffer_centerline(line):
-    return line.buffer(
-        WALL_THICKNESS / 2,
-        cap_style=3,
-        join_style=2
+def is_valid_volume(mesh):
+    return (
+        mesh is not None
+        and mesh.is_watertight
+        and mesh.is_volume
+        and mesh.volume > 0
     )
 
 
@@ -192,7 +195,7 @@ def buffer_centerline(line):
 # ======================
 
 def detect_rooms_from_walls(walls):
-    lines = [LineString(w["points"]) for w in walls if len(w["points"]) >= 2]
+    lines = [LineString(scale_coords(w["points"])) for w in walls if len(w["points"]) >= 2]
     merged = unary_union(lines)
 
     rooms = []
@@ -205,6 +208,56 @@ def detect_rooms_from_walls(walls):
 
 
 # ======================
+# WALL SOLIDS
+# ======================
+
+def build_wall_solids(walls):
+    lines = []
+    for w in walls:
+        pts = scale_coords(w["points"])
+        if len(pts) >= 2:
+            lines.append(LineString(pts))
+
+    merged = unary_union(lines)
+
+    if isinstance(merged, LineString):
+        merged = [merged]
+    else:
+        merged = list(merged.geoms)
+
+    buffered = unary_union([
+        line.buffer(
+            WALL_THICKNESS / 2,
+            cap_style=3,
+            join_style=2
+        )
+        for line in merged
+    ])
+
+    buffered = force_2d(buffered)
+
+    if isinstance(buffered, Polygon):
+        return [buffered]
+    elif isinstance(buffered, MultiPolygon):
+        return list(buffered.geoms)
+    return []
+
+
+# ======================
+# OPENING CUTTERS
+# ======================
+
+def opening_volume(edge, height, base_z=0.0):
+    line = LineString(scale_coords(edge))
+    rect = line.buffer(WALL_THICKNESS * 0.6, cap_style=3)
+    rect = force_2d(rect)
+
+    mesh = extrude(rect, height)
+    mesh.apply_translation((0, 0, base_z))
+    return mesh
+
+
+# ======================
 # MAIN BUILDER
 # ======================
 
@@ -213,68 +266,67 @@ def build_mesh(geometry, output_path):
 
     meshes = []
 
-    # -------------------------
-    # FLOOR SLAB
-    # -------------------------
+    # -------- FLOOR --------
     raw_rooms = detect_rooms_from_walls(geometry["walls"])
-    rooms = [Polygon(scale_coords(r.exterior.coords)) for r in raw_rooms]
 
-    unioned = unary_union(rooms)
-    if isinstance(unioned, MultiPolygon):
-        unioned = max(unioned.geoms, key=lambda p: p.area)
+    if raw_rooms:
+        rooms = [force_2d(r) for r in raw_rooms]
+        unioned = force_2d(unary_union(rooms))
 
-    floor_mesh = extrude(unioned, FLOOR_HEIGHT)
-    floor_mesh.visual.material = get_pbr_material("tile")
-    meshes.append(floor_mesh)
+        if unioned and not unioned.is_empty:
+            if isinstance(unioned, MultiPolygon):
+                unioned = max(unioned.geoms, key=lambda p: p.area)
 
-    print("🧱 Floor slab created")
-
-    # -------------------------
-    # WALL CENTERLINES
-    # -------------------------
-    wall_lines = []
-    for wall in geometry["walls"]:
-        pts = scale_coords(wall["points"])
-        if len(pts) >= 2:
-            wall_lines.append(LineString(pts))
-
-    merged_lines = unary_union(wall_lines)
-    if isinstance(merged_lines, LineString):
-        merged_lines = [merged_lines]
+            floor_mesh = extrude(unioned, FLOOR_HEIGHT)
+            floor_mesh.visual.material = get_pbr_material("tile")
+            meshes.append(floor_mesh)
+            print("🧱 Floor slab created")
+        else:
+            print("⚠ No valid floor polygon. Skipping floor.")
     else:
-        merged_lines = list(merged_lines.geoms)
+        print("⚠ No rooms found. Skipping floor.")
 
-    print(f"🧱 Continuous wall centerlines: {len(merged_lines)}")
+    # -------- WALLS --------
+    wall_polys = build_wall_solids(geometry["walls"])
+    print(f"🧱 Wall solids generated: {len(wall_polys)}")
 
     wall_meshes = []
+    for poly in wall_polys:
+        features = extract_wall_features(poly, WALL_HEIGHT, layer="a-wall")
+        material = get_pbr_material(predict_material(features))
 
-    for line in merged_lines:
-        poly = buffer_centerline(line)
-        if not poly.is_valid:
-            continue
+        mesh = extrude(poly, WALL_HEIGHT)
+        mesh.visual.material = material
+        wall_meshes.append(mesh)
 
-        # -------- AI FEATURE EXTRACTION --------
-        features = extract_wall_features(
-            poly,
-            WALL_HEIGHT,
-            layer="a-wall"
-        )
+    walls_mesh = trimesh.util.concatenate(wall_meshes)
 
-        material_name = predict_material(features)
-        material = get_pbr_material(material_name)
+    # -------- DOOR / WINDOW CUTS --------
+    cutters = []
 
-        wall_mesh = extrude(poly, WALL_HEIGHT)
-        wall_mesh.visual.material = material
-        wall_meshes.append(wall_mesh)
+    for d in geometry["doors"]:
+        c = opening_volume(d["points"], DOOR_HEIGHT, 0.0)
+        if is_valid_volume(c):
+            cutters.append(c)
 
-    print("🎨 Wall materials applied")
+    for w in geometry["windows"]:
+        c = opening_volume(w["points"], WINDOW_HEIGHT, WINDOW_BASE)
+        if is_valid_volume(c):
+            cutters.append(c)
 
-    walls_combined = trimesh.util.concatenate(wall_meshes)
-    meshes.append(walls_combined)
+    if cutters:
+        print(f"🚪🪟 Cutting {len(cutters)} openings from walls...")
+        try:
+            merged = trimesh.util.concatenate(cutters)
+            walls_mesh = walls_mesh.difference(merged)
+        except Exception as e:
+            print(f"⚠ Boolean cutting failed: {e}")
+    else:
+        print("⚠ No valid cutters found. Skipping openings.")
 
-    # -------------------------
-    # FINAL EXPORT
-    # -------------------------
+    meshes.append(walls_mesh)
+
+    # -------- EXPORT --------
     final_mesh = trimesh.util.concatenate(meshes)
     final_mesh = center_mesh(final_mesh)
 
@@ -282,3 +334,4 @@ def build_mesh(geometry, output_path):
     final_mesh.export(glb_path)
 
     print("🎉 GLB exported with PBR materials:", glb_path)
+    return glb_path

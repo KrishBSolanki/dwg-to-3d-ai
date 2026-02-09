@@ -84,95 +84,186 @@
 #         "doors": doors,
 #         "windows": windows
 #     }
+from shapely.geometry import Polygon, LineString
+from shapely.ops import unary_union
 
-from shapely.geometry import Polygon, MultiPolygon
+
+# =========================================================
+# UTILITIES
+# =========================================================
+
+def is_closed(points, tol=1e-6):
+    if len(points) < 3:
+        return False
+    x1, y1 = points[0]
+    x2, y2 = points[-1]
+    return abs(x1 - x2) < tol and abs(y1 - y2) < tol
 
 
-def categorize_layer(layer_name: str):
-    layer = layer_name.lower()
+def polygon_from_points(points):
+    try:
+        poly = Polygon(points)
+        if poly.is_valid and poly.area > 10:
+            return poly
+    except Exception:
+        pass
+    return None
 
-    if any(k in layer for k in ["wall", "a-wall", "partition", "a-part"]):
-        return "walls"
-    elif any(k in layer for k in ["floor", "slab", "a-flor"]):
-        return "floors"
-    elif any(k in layer for k in ["door", "a-door", "opening"]):
-        return "doors"
-    elif any(k in layer for k in ["window", "a-win", "glaz"]):
-        return "windows"
-    else:
-        return "ignore"
 
+def edges_from_boundary(coords):
+    edges = []
+    for i in range(len(coords) - 1):
+        edges.append([coords[i], coords[i + 1]])
+    return edges
+
+
+def segment_length(seg):
+    (x1, y1), (x2, y2) = seg
+    return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+
+# =========================================================
+# CORE EXTRACTION WITH DOOR/WINDOW INFERENCE
+# =========================================================
 
 def extract_walls_floors_doors_windows(entities):
     walls = []
-    floors_raw = []
     doors = []
     windows = []
+    floor_polygons = []
+
+    inferred_walls = []
+    inferred_rooms = []
+
     ignored = 0
 
-    for item in entities:
-        layer = item.get("layer", "")
-        etype = item["type"]
-        category = categorize_layer(layer)
-
-        pts = []
-
-        if etype == "LINE":
-            x1, y1, _ = item["start"]
-            x2, y2, _ = item["end"]
-            pts = [(x1, y1), (x2, y2)]
-
-        elif etype in ["POLYLINE", "LWPOLYLINE", "SPLINE"]:
-            pts = [(p[0], p[1]) for p in item.get("points", [])]
+    # -----------------------------------------------------
+    # PASS 1: SEMANTIC EXTRACTION
+    # -----------------------------------------------------
+    for e in entities:
+        semantic = e["semantic"]
+        geom = e["geometry"]
+        pts = geom.get("points", [])
 
         if len(pts) < 2:
             continue
 
-        # ---------------- WALLS ----------------
-        if category == "walls":
+        if semantic == "wall":
             walls.append({
                 "points": pts,
-                "layer": layer
+                "confidence": e["confidence"],
+                "layer": e["layer"],
+                "inferred": False
             })
 
-        # ---------------- FLOORS ----------------
-        elif category == "floors" and etype in ["POLYLINE", "LWPOLYLINE"] and item.get("closed", False):
-            try:
-                poly = Polygon(pts)
-                if poly.is_valid and poly.area > 10:
-                    floors_raw.append(poly)
-            except:
-                continue
+        elif semantic == "door":
+            doors.append({
+                "points": pts,
+                "confidence": e["confidence"],
+                "inferred": False
+            })
 
-        # ---------------- DOORS ----------------
-        elif category == "doors":
-            doors.append(pts)
+        elif semantic == "window":
+            windows.append({
+                "points": pts,
+                "confidence": e["confidence"],
+                "inferred": False
+            })
 
-        # ---------------- WINDOWS ----------------
-        elif category == "windows":
-            windows.append(pts)
+        elif semantic == "floor" and geom.get("closed", False):
+            poly = polygon_from_points(pts)
+            if poly:
+                floor_polygons.append(poly)
 
         else:
             ignored += 1
 
-    # ---------------- FLOOR PLAN DETECTION ----------------
+    # -----------------------------------------------------
+    # PASS 2: GEOMETRY-BASED WALL / ROOM INFERENCE
+    # -----------------------------------------------------
+    if not walls:
+        print("⚠ No semantic walls found. Using geometry-based inference.")
+
+        closed_polys = []
+
+        for e in entities:
+            pts = e["geometry"].get("points", [])
+            if is_closed(pts):
+                poly = polygon_from_points(pts)
+                if poly:
+                    closed_polys.append(poly)
+
+        if closed_polys:
+            footprint = max(closed_polys, key=lambda p: p.area)
+            floor_polygons.append(footprint)
+
+            inferred_rooms.append(list(footprint.exterior.coords))
+
+            boundary_edges = edges_from_boundary(list(footprint.exterior.coords))
+
+            # -------------------------------------------------
+            # DOOR & WINDOW INFERENCE FROM BOUNDARY EDGES
+            # -------------------------------------------------
+            for edge in boundary_edges:
+                length = segment_length(edge)
+
+                # Typical door width: ~0.7–1.2 m (CAD units vary → relative rule)
+                if 0.6 < length < 1.4:
+                    doors.append({
+                        "points": edge,
+                        "confidence": 0.55,
+                        "inferred": True
+                    })
+
+                # Typical window width: ~0.4–2.0 m but thinner than doors
+                elif 0.3 < length <= 0.6:
+                    windows.append({
+                        "points": edge,
+                        "confidence": 0.5,
+                        "inferred": True
+                    })
+
+                else:
+                    inferred_walls.append({
+                        "points": edge,
+                        "confidence": 0.65,
+                        "layer": "inferred",
+                        "inferred": True,
+                        "curved": True
+                    })
+
+    # -----------------------------------------------------
+    # FLOOR + ROOM LOGIC
+    # -----------------------------------------------------
     floor_boundary = []
     rooms = []
 
-    if floors_raw:
-        largest_floor = max(floors_raw, key=lambda p: p.area)
-        floor_boundary = list(largest_floor.exterior.coords)
+    if floor_polygons:
+        merged = unary_union(floor_polygons)
 
-        for poly in floors_raw:
-            if poly.area < largest_floor.area:
+        if merged.geom_type == "Polygon":
+            floor_boundary = list(merged.exterior.coords)
+        else:
+            largest = max(merged.geoms, key=lambda p: p.area)
+            floor_boundary = list(largest.exterior.coords)
+
+        for poly in floor_polygons:
+            if poly.area <= Polygon(floor_boundary).area:
                 rooms.append(list(poly.exterior.coords))
 
-    print("Filtered walls:", len(walls))
-    print("Filtered doors:", len(doors))
-    print("Filtered windows:", len(windows))
-    print("Floor boundary detected:", bool(floor_boundary))
-    print("Rooms detected:", len(rooms))
-    print("Ignored entities:", ignored)
+    # Merge inferred geometry
+    walls.extend(inferred_walls)
+    rooms.extend(inferred_rooms)
+
+    # -----------------------------------------------------
+    # DEBUG OUTPUT
+    # -----------------------------------------------------
+    print("✔ Walls:", len(walls))
+    print("✔ Doors:", len(doors))
+    print("✔ Windows:", len(windows))
+    print("✔ Rooms:", len(rooms))
+    print("✔ Floor boundary:", bool(floor_boundary))
+    print("✖ Ignored:", ignored)
 
     return {
         "walls": walls,

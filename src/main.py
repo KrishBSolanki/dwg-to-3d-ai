@@ -39,63 +39,39 @@ from src.preprocessing.extract_geometry import extract_walls_floors_doors_window
 from src.renderer.mesh_reconstruction import build_mesh
 
 
-
-# ======================
-# PATHS
-# ======================
-
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_DIR = BASE_DIR / "../data/input_dwg"
-OUTPUT_DIR = BASE_DIR / "../data/output_3d"
+INPUT_DIR = (BASE_DIR / "../data/input_dwg").resolve()
+OUTPUT_DIR = (BASE_DIR / "../data/output_3d").resolve()
 
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ======================
-# MAIN PIPELINE
-# ======================
-
 def run_pipeline(dxf_path: Path):
     print("📂 Loading DXF:", dxf_path)
 
-    # 1️⃣ Parse DWG/DXF
     entities = parse_dwg(dxf_path)
-
     if not entities:
-        raise ValueError("No entities parsed from DXF")
+        raise RuntimeError("No entities parsed")
 
-    # 2️⃣ Extract geometry
     geometry = extract_walls_floors_doors_windows(entities)
-
     if not geometry["walls"]:
-        raise ValueError("No wall geometry extracted")
+        raise RuntimeError("No walls detected")
 
-    # 3️⃣ Build 3D mesh
     output_path = OUTPUT_DIR / dxf_path.stem
     build_mesh(geometry, output_path)
 
     print("🎉 Pipeline completed successfully!")
 
 
-# ======================
-# CLI ENTRY POINT
-# ======================
-
 if __name__ == "__main__":
-
     if len(sys.argv) < 2:
-        print("Usage:")
-        print("python main.py <path_to_dxf_file>")
+        print("Usage: python main.py <path_to_dxf>")
         sys.exit(1)
 
     dxf_file = Path(sys.argv[1])
-
     if not dxf_file.exists():
-        print("❌ DXF file not found:", dxf_file)
+        print("❌ File not found:", dxf_file)
         sys.exit(1)
 
-    try:
-        run_pipeline(dxf_file)
-    except Exception as e:
-        print("❌ Pipeline failed:", e)
+    run_pipeline(dxf_file)
