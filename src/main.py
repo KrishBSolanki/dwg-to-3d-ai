@@ -68,7 +68,7 @@
 import sys
 from pathlib import Path
 
-from src.dwg_parser.dxf_to_structure import build_geometry_from_dxf
+from src.dwg_parser.dxf_to_structure import build_structure_from_dxf
 from src.perception.cubicasa.infer import CubiCasaInference
 from src.perception.cubicasa.postprocess import build_structure as build_structure_from_ai
 from src.renderer.mesh_reconstruction import build_mesh_from_ai
