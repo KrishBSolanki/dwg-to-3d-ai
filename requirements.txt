@@ -1,32 +1,53 @@
-# Core math & arrays
+# -------------------------
+# Core Numerical Stack
+# -------------------------
 numpy
+scipy
 
-# CAD parsing
+# -------------------------
+# Computer Vision
+# -------------------------
+opencv-python
+Pillow
+
+# -------------------------
+# CAD Parsing
+# -------------------------
 ezdxf
 
-# Geometry processing
+# -------------------------
+# Geometry Processing
+# -------------------------
 shapely
+rtree
 
-# 3D mesh & rendering
+# -------------------------
+# 3D Mesh
+# -------------------------
 trimesh
-pyrender
-Pillow
-matplotlib
+pygltflib
 
+# -------------------------
 # Machine Learning
+# -------------------------
 scikit-learn
 xgboost
 joblib
 
-# Deep learning (future roadmap)
+# -------------------------
+# Deep Learning (CubiCasa)
+# -------------------------
 torch
 torchvision
 
-# Testing
-pytest
-
-# File formats
-pygltflib
-
+# -------------------------
 # Utilities
+# -------------------------
 tqdm
+matplotlib
+networkx
+
+# -------------------------
+# Testing
+# -------------------------
+pytest
