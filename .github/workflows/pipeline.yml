@@ -30,7 +30,8 @@ jobs:
         pip install -r requirements.txt
 
     - name: Run pipeline
-      run: xvfb-run -a python -m src.main data/input_dwg/sample31.dxf
+      # run: xvfb-run -a python -m src.main data/input_dwg/sample31.dxf
+      run: xvfb-run -a python -m src.main data/input_dwg/sample31.dxf output.glb
 
     - name: Run tests
       run: |
