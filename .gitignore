@@ -19,3 +19,9 @@ __pycache__/
 outputs/
 uploads/
 .DS_Store
+# ML Weights
+*.pth
+*.pkl
+src/perception/cubicasa/weights/
+src/perception/cubicasa/floortrans/models/
+
