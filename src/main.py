@@ -86,7 +86,7 @@ def run_pipeline(input_path: str, output_path: str):
     if input_file.suffix.lower() == ".dxf":
 
         print("📐 DXF detected → Using CAD pipeline")
-        geometry = build_geometry_from_dxf(input_file)
+        geometry = build_structure_from_dxf(input_file)
 
     # ------------------------------------------
     # AI IMAGE PIPELINE
