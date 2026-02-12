@@ -115,7 +115,14 @@ def scale_polygon(poly: Polygon):
 # --------------------------------------------------------
 
 def extrude_polygon(poly: Polygon, height: float):
-    return trimesh.creation.extrude_polygon(poly, height)
+    """
+    Extrude polygon using mapbox-earcut engine (CI safe)
+    """
+    return trimesh.creation.extrude_polygon(
+        poly,
+        height,
+        triangulate_kwargs={"engine": "earcut"}
+    )
 
 
 # --------------------------------------------------------
