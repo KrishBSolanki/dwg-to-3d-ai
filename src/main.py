@@ -1,77 +1,125 @@
-# from dwg_parser.parse_dwg import parse_dwg, save_json
-# from preprocessing.extract_geometry import geometry_to_3d
-# from renderer.render_obj import save_obj
-# from renderer.render_png import render_png
+
+# import sys
 # from pathlib import Path
 
-# BASE_DIR = Path(__file__).resolve().parent.parent
+# from src.perception.cubicasa.infer import CubiCasaInference
+# from src.perception.cubicasa.postprocess import build_structure as build_structure_from_ai
+# from src.geometry.mesh_from_polygons import build_mesh_from_structure
 
-# INPUT_DWG =  "data/input_dwg/sample.dxf"
-# JSON_OUT =  "data/processed/geometry.json"
-# OBJ_OUT =  "data/output_3d/model.obj"
-# PNG_OUT =  "data/output_3d/model.png"
+# # NEW IMPORT
+# from src.dwg_parser.dxf_to_structure import build_structure_from_dxf
 
 
-# def main():
-#     print("Parsing DWG...")
-#     entities = parse_dwg(str(INPUT_DWG))
-#     save_json(entities, JSON_OUT)
+# def run_pipeline(input_path: str, output_path: str):
 
-#     print("Extracting geometry...")
-#     vertices = geometry_to_3d(JSON_OUT)
+#     print("🚀 Starting CAD → 3D pipeline")
 
-#     print("Saving OBJ...")
-#     save_obj(vertices, OBJ_OUT)
+#     input_file = Path(input_path)
 
-#     print("Rendering PNG...")
-#     render_png(OBJ_OUT, PNG_OUT)
+#     # ==============================
+#     # 1️⃣ Decide Pipeline
+#     # ==============================
 
-#     print("Pipeline complete!")
+#     if input_file.suffix.lower() == ".dxf":
+#         print("📐 DXF detected → Using CAD pipeline")
+#         structure = build_structure_from_dxf(input_file)
+
+#     else:
+#         print("🧠 Image detected → Using AI segmentation pipeline")
+
+#         infer = CubiCasaInference()
+#         class_map = infer.predict(input_path)
+
+#         print("✅ Segmentation complete")
+
+#         structure = build_structure_from_ai(class_map)
+
+#     # ==============================
+#     # 2️⃣ Structure → Mesh
+#     # ==============================
+
+#     print("✅ Structure built")
+#     print("Walls:", len(structure.walls))
+
+#     mesh = build_mesh_from_structure(structure)
+
+#     if mesh is None:
+#         print("❌ No mesh generated")
+#         return
+
+#     # ==============================
+#     # 3️⃣ Export
+#     # ==============================
+
+#     mesh.export(output_path)
+#     print(f"🎉 GLB exported to: {output_path}")
 
 
 # if __name__ == "__main__":
-#     main()
+
+#     if len(sys.argv) < 3:
+#         print("Usage: python -m src.main input_file output.glb")
+#         sys.exit(1)
+
+#     input_file = sys.argv[1]
+#     output_file = sys.argv[2]
+
+#     run_pipeline(input_file, output_file)
 import sys
 from pathlib import Path
 
-from src.dwg_parser.parse_dwg import parse_dwg
-from src.preprocessing.extract_geometry import extract_walls_floors_doors_windows
-from src.renderer.mesh_reconstruction import build_mesh
+from src.dwg_parser.dxf_to_structure import build_geometry_from_dxf
+from src.perception.cubicasa.infer import CubiCasaInference
+from src.perception.cubicasa.postprocess import build_structure as build_structure_from_ai
+from src.renderer.mesh_reconstruction import build_mesh_from_ai
 
 
-BASE_DIR = Path(__file__).resolve().parent
-INPUT_DIR = (BASE_DIR / "../data/input_dwg").resolve()
-OUTPUT_DIR = (BASE_DIR / "../data/output_3d").resolve()
+def run_pipeline(input_path: str, output_path: str):
 
-INPUT_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    print("🚀 Starting CAD / AI → 3D pipeline")
 
+    input_file = Path(input_path)
 
-def run_pipeline(dxf_path: Path):
-    print("📂 Loading DXF:", dxf_path)
+    # ------------------------------------------
+    # DXF PIPELINE
+    # ------------------------------------------
+    if input_file.suffix.lower() == ".dxf":
 
-    entities = parse_dwg(dxf_path)
-    if not entities:
-        raise RuntimeError("No entities parsed")
+        print("📐 DXF detected → Using CAD pipeline")
+        geometry = build_geometry_from_dxf(input_file)
 
-    geometry = extract_walls_floors_doors_windows(entities)
-    if not geometry["walls"]:
-        raise RuntimeError("No walls detected")
+    # ------------------------------------------
+    # AI IMAGE PIPELINE
+    # ------------------------------------------
+    else:
 
-    output_path = OUTPUT_DIR / dxf_path.stem
-    build_mesh(geometry, output_path)
+        print("🧠 Image detected → Using AI pipeline")
 
-    print("🎉 Pipeline completed successfully!")
+        infer = CubiCasaInference()
+        class_map = infer.predict(input_path)
+
+        structure = build_structure_from_ai(class_map)
+
+        geometry = {
+            "rooms": [r.polygon for r in structure.rooms],
+            "walls": structure.walls,
+            "doors": structure.doors,
+            "windows": structure.windows
+        }
+
+    # ------------------------------------------
+    # BUILD MESH
+    # ------------------------------------------
+    build_mesh_from_ai(geometry, Path(output_path))
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python main.py <path_to_dxf>")
+
+    if len(sys.argv) < 3:
+        print("Usage: python -m src.main input_file output.glb")
         sys.exit(1)
 
-    dxf_file = Path(sys.argv[1])
-    if not dxf_file.exists():
-        print("❌ File not found:", dxf_file)
-        sys.exit(1)
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
 
-    run_pipeline(dxf_file)
+    run_pipeline(input_file, output_file)

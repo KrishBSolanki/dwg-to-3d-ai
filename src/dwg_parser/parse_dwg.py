@@ -84,7 +84,7 @@ from typing import List, Dict
 # =========================
 
 IGNORE_ENTITY_TYPES = {
-    "TEXT", "MTEXT", "DIMENSION", "HATCH", "INSERT", "LEADER"
+    "TEXT", "MTEXT", "DIMENSION", "HATCH", "LEADER"
 }
 
 # Industry-style layer hints
@@ -114,10 +114,14 @@ def infer_semantic_type(layer_name: str):
 
 def parse_dwg(file_path: Path) -> List[Dict]:
     doc = ezdxf.readfile(str(file_path))
+    print("DXF Units:", doc.units)
+
     msp = doc.modelspace()
 
     entities = []
     ignored = 0
+    layers_seen = set()
+
 
     for e in msp:
         etype = e.dxftype()
@@ -128,6 +132,9 @@ def parse_dwg(file_path: Path) -> List[Dict]:
 
         layer = e.dxf.layer.lower() if hasattr(e.dxf, "layer") else "default"
         semantic = infer_semantic_type(layer)
+        if layer not in layers_seen:
+            print("Layer detected:", layer)
+            layers_seen.add(layer)
 
         base = {
             "entity_type": etype,
