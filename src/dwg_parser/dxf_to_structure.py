@@ -197,11 +197,11 @@
 #         i = j
 
 #     return merged
-
 from dataclasses import dataclass
 from typing import List, Tuple
 from pathlib import Path
 import math
+from shapely.geometry import Polygon
 
 from .parse_dwg import parse_dwg
 
@@ -218,7 +218,7 @@ class Wall:
     id: int
     start: Point
     end: Point
-    thickness: float = 12.0  # inches
+    thickness: float = 12.0
     height: float = 3.0
 
 
@@ -232,10 +232,10 @@ class Opening:
 
 @dataclass
 class BuildingStructure:
-    walls: List[Wall]
-    doors: List[Opening]
-    windows: List[Opening]
-    rooms: List = None
+    walls: List
+    doors: List
+    windows: List
+    rooms: List
 
 
 # --------------------------------------------------------
@@ -251,72 +251,85 @@ def build_structure_from_dxf(file_path: Path) -> BuildingStructure:
     walls = []
     doors = []
     windows = []
+    room_polygons = []
 
     wall_id = 0
-    door_id = 0
-    window_id = 0
+
+    # --------------------------------------------------------
+    # 1️⃣ Try Semantic Wall Detection
+    # --------------------------------------------------------
 
     for ent in entities:
 
-        geom = ent["geometry"]
-
-        if geom["type"] != "line":
+        geom = ent.get("geometry")
+        if not geom:
             continue
 
-        p1, p2 = geom["points"]
-        length = math.dist(p1, p2)
+        if geom["type"] == "line" and ent["semantic"] == "wall":
+            p1, p2 = geom["points"]
+            length = math.dist(p1, p2)
 
-        if length < 50:  # ignore drafting fragments
-            continue
-
-        # ------------------------------------------------
-        # WALL
-        # ------------------------------------------------
-        if ent["semantic"] == "wall":
+            if length < 50:
+                continue
 
             walls.append(
                 Wall(
                     id=wall_id,
                     start=p1,
                     end=p2,
-                    thickness=12.0  # 12 inch wall
+                    thickness=12.0
                 )
             )
             wall_id += 1
 
-        # ------------------------------------------------
-        # DOOR
-        # ------------------------------------------------
-        elif ent["semantic"] == "door":
+    print(f"🔎 Raw wall segments: {len(walls)}")
 
-            doors.append(
-                Opening(
-                    id=door_id,
-                    start=p1,
-                    end=p2,
-                    thickness=4.0
+    # --------------------------------------------------------
+    # 2️⃣ If No Semantic Walls → Geometric Detection
+    # --------------------------------------------------------
+
+    if len(walls) == 0:
+        print("⚠ No semantic walls detected — switching to geometric detection")
+
+        poly_id = 0
+
+        for ent in entities:
+            geom = ent.get("geometry")
+            if not geom:
+                continue
+
+            if geom["type"] in {"polyline", "spline"}:
+                pts = geom["points"]
+
+                if len(pts) < 3:
+                    continue
+
+                try:
+                    poly = Polygon(pts)
+                    if poly.is_valid and poly.area > 100:
+                        room_polygons.append(poly)
+                except Exception:
+                    continue
+
+        print(f"🧱 Geometric wall polygons: {len(room_polygons)}")
+
+        # Convert polygons to Wall-like structures
+        for poly in room_polygons:
+            coords = list(poly.exterior.coords)
+            for i in range(len(coords) - 1):
+                walls.append(
+                    Wall(
+                        id=wall_id,
+                        start=coords[i],
+                        end=coords[i + 1],
+                        thickness=12.0
+                    )
                 )
-            )
-            door_id += 1
+                wall_id += 1
 
-        # ------------------------------------------------
-        # WINDOW
-        # ------------------------------------------------
-        elif ent["semantic"] == "window":
+    # --------------------------------------------------------
 
-            windows.append(
-                Opening(
-                    id=window_id,
-                    start=p1,
-                    end=p2,
-                    thickness=4.0
-                )
-            )
-            window_id += 1
-
-    print(f"🧱 Walls detected: {len(walls)}")
-    print(f"🚪 Doors detected: {len(doors)}")
-    print(f"🪟 Windows detected: {len(windows)}")
+    print(f"🧱 Final walls: {len(walls)}")
 
     return BuildingStructure(
         walls=walls,
@@ -324,3 +337,4 @@ def build_structure_from_dxf(file_path: Path) -> BuildingStructure:
         windows=windows,
         rooms=[]
     )
+

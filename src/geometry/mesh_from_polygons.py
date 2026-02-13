@@ -62,52 +62,39 @@
 
 #     return final_mesh
 
-import numpy as np
 import trimesh
-import math
-
 from shapely.geometry import Polygon, LineString, MultiPolygon
 from shapely.ops import unary_union
+
+from .wall_cleaner import clean_wall_polygons
 
 
 # --------------------------------------------------------
 # GLOBAL CONFIG
 # --------------------------------------------------------
 
-# DXF units = inches → meters
-UNIT_SCALE = 0.0254
+UNIT_SCALE = 0.0254  # inches → meters
 
 WALL_HEIGHT = 3.0
 FLOOR_THICKNESS = 0.20
 CEILING_THICKNESS = 0.15
 
+MIN_WALL_THICKNESS = 0.15  # meters
+
 
 # --------------------------------------------------------
-# WALL CONVERSION
+# WALL → POLYGON
 # --------------------------------------------------------
 
 def wall_to_polygon(wall):
-    """
-    Convert parametric Wall (centerline + thickness)
-    into rectangular Shapely polygon.
-    """
+    thickness = max(wall.thickness * UNIT_SCALE, MIN_WALL_THICKNESS)
 
-    line = LineString([wall.start, wall.end])
+    line = LineString([
+        (wall.start[0] * UNIT_SCALE, wall.start[1] * UNIT_SCALE),
+        (wall.end[0] * UNIT_SCALE, wall.end[1] * UNIT_SCALE)
+    ])
 
-    # square caps = clean wall ends
-    poly = line.buffer(wall.thickness / 2.0, cap_style=2)
-
-    return poly
-
-
-# --------------------------------------------------------
-# SCALE UTIL
-# --------------------------------------------------------
-
-def scale_polygon(poly: Polygon):
-    coords = np.array(poly.exterior.coords)
-    coords = coords * UNIT_SCALE
-    return Polygon(coords)
+    return line.buffer(thickness / 2.0, cap_style=2)
 
 
 # --------------------------------------------------------
@@ -115,9 +102,6 @@ def scale_polygon(poly: Polygon):
 # --------------------------------------------------------
 
 def extrude_polygon(poly: Polygon, height: float):
-    """
-    Extrude polygon using mapbox-earcut engine (CI safe)
-    """
     return trimesh.creation.extrude_polygon(
         poly,
         height,
@@ -126,7 +110,7 @@ def extrude_polygon(poly: Polygon, height: float):
 
 
 # --------------------------------------------------------
-# MESH CENTERING
+# CENTERING
 # --------------------------------------------------------
 
 def center_mesh(mesh):
@@ -135,141 +119,87 @@ def center_mesh(mesh):
 
 
 # --------------------------------------------------------
-# MAIN BUILDER
+# MAIN BUILDER (WALL UNION APPROACH)
 # --------------------------------------------------------
 
 def build_mesh_from_structure(structure):
 
-    print("🏗 Building mesh from unified structure...")
+    print("🏗 Building mesh from wall union...")
 
-    meshes = []
+    # ----------------------------------------------------
+    # 1️⃣ BUILD WALL POLYGONS
+    # ----------------------------------------------------
+
     wall_polygons = []
 
-    # ----------------------------------------------------
-    # WALLS
-    # ----------------------------------------------------
-
     for wall in structure.walls:
+        poly = wall_to_polygon(wall)
+        if poly and poly.is_valid:
+            wall_polygons.append(poly)
 
-        # AI segmentation polygon case
-        if isinstance(wall, Polygon):
-            wall_poly = wall
+    print(f"🧱 Raw wall polygons: {len(wall_polygons)}")
 
-        # CAD parametric wall case
-        else:
-            wall_poly = wall_to_polygon(wall)
-
-        if wall_poly is None or not wall_poly.is_valid:
-            continue
-
-        wall_polygons.append(wall_poly)
-
-        scaled = scale_polygon(wall_poly)
-
-        wall_mesh = extrude_polygon(scaled, WALL_HEIGHT)
-        meshes.append(wall_mesh)
-
-    print(f"🧱 Walls created: {len(wall_polygons)}")
-
-    # ----------------------------------------------------
-    # FLOOR
-    # ----------------------------------------------------
-
-    floor_polygon = None
-
-    # If AI rooms exist → use them
-    if hasattr(structure, "rooms") and structure.rooms:
-
-        room_polys = [room.polygon for room in structure.rooms]
-        unioned = unary_union(room_polys)
-
-        if isinstance(unioned, MultiPolygon):
-            unioned = max(unioned.geoms, key=lambda p: p.area)
-
-        floor_polygon = unioned
-
-    # If DXF only → generate floor from wall union
-    elif wall_polygons:
-        unioned = unary_union(wall_polygons)
-
-        if isinstance(unioned, MultiPolygon):
-            unioned = max(unioned.geoms, key=lambda p: p.area)
-
-        floor_polygon = unioned
-
-    if floor_polygon:
-        floor_scaled = scale_polygon(floor_polygon)
-        floor_mesh = extrude_polygon(floor_scaled, FLOOR_THICKNESS)
-        meshes.append(floor_mesh)
-        print("🧱 Floor slab created")
-
-    # ----------------------------------------------------
-    # CEILING
-    # ----------------------------------------------------
-
-    if floor_polygon:
-        ceiling_scaled = scale_polygon(floor_polygon)
-        ceiling_mesh = extrude_polygon(ceiling_scaled, CEILING_THICKNESS)
-
-        ceiling_mesh.apply_translation((0, 0, WALL_HEIGHT))
-        meshes.append(ceiling_mesh)
-
-        print("🧱 Ceiling slab created")
-
-    # ----------------------------------------------------
-    # DOOR & WINDOW CUTOUTS
-    # ----------------------------------------------------
-
-    openings = []
-
-    if hasattr(structure, "doors"):
-        openings.extend(structure.doors)
-
-    if hasattr(structure, "windows"):
-        openings.extend(structure.windows)
-
-    if openings and meshes:
-
-        print("🚪 Cutting door & window openings...")
-
-        opening_meshes = []
-
-        for opening in openings:
-
-            if isinstance(opening, Polygon):
-                poly = opening
-            else:
-                poly = wall_to_polygon(opening)
-
-            if poly is None or not poly.is_valid:
-                continue
-
-            scaled = scale_polygon(poly)
-            cut_mesh = extrude_polygon(scaled, WALL_HEIGHT)
-            opening_meshes.append(cut_mesh)
-
-        if opening_meshes:
-            openings_mesh = trimesh.util.concatenate(opening_meshes)
-
-            # Walls are first meshes
-            walls_mesh = meshes[0]
-
-            try:
-                cut_result = walls_mesh.difference(openings_mesh)
-                meshes[0] = cut_result
-                print("✂ Boolean subtraction complete")
-            except Exception as e:
-                print("⚠ Boolean failed:", e)
-
-    # ----------------------------------------------------
-    # FINAL MERGE
-    # ----------------------------------------------------
-
-    if not meshes:
-        print("❌ No mesh generated")
+    if not wall_polygons:
+        print("❌ No wall polygons created")
         return None
 
-    final_mesh = trimesh.util.concatenate(meshes)
+    # ----------------------------------------------------
+    # 2️⃣ CLEAN WALLS
+    # ----------------------------------------------------
+
+    cleaned = clean_wall_polygons(wall_polygons)
+
+    print(f"🧱 Cleaned wall masses: {len(cleaned)}")
+
+    if not cleaned:
+        print("❌ Wall cleaning failed")
+        return None
+
+    # ----------------------------------------------------
+    # 3️⃣ UNION WALL MASS
+    # ----------------------------------------------------
+
+    wall_union = unary_union(cleaned)
+
+    if wall_union.is_empty:
+        print("❌ Wall union failed")
+        return None
+
+    # If multiple islands exist → keep largest
+    if isinstance(wall_union, MultiPolygon):
+        wall_union = max(wall_union.geoms, key=lambda p: p.area)
+
+    print("🧱 Union complete")
+
+    # ----------------------------------------------------
+    # 4️⃣ EXTRUDE WALL MASS DIRECTLY
+    # ----------------------------------------------------
+
+    walls_mesh = extrude_polygon(wall_union, WALL_HEIGHT)
+
+    # ----------------------------------------------------
+    # 5️⃣ FLOOR (from outer boundary)
+    # ----------------------------------------------------
+
+    floor_mesh = extrude_polygon(wall_union, FLOOR_THICKNESS)
+
+    # ----------------------------------------------------
+    # 6️⃣ CEILING
+    # ----------------------------------------------------
+
+    ceiling_mesh = extrude_polygon(wall_union, CEILING_THICKNESS)
+    ceiling_mesh.apply_translation((0, 0, WALL_HEIGHT))
+
+    # ----------------------------------------------------
+    # 7️⃣ FINAL MERGE
+    # ----------------------------------------------------
+
+    final_mesh = trimesh.util.concatenate([
+        walls_mesh,
+        floor_mesh,
+        ceiling_mesh
+    ])
+
     final_mesh = center_mesh(final_mesh)
 
     print("✅ Final mesh ready")

@@ -1,7 +1,7 @@
 from pathlib import Path
 import subprocess
 
-from src.dwg_parser.dxf_to_structure import build_structure_from_dxf
+from src.dwg_parser.dxf_to_structure import build_structure_from_dxf, BuildingStructure
 from src.geometry.mesh_from_polygons import build_mesh_from_structure
 
 
@@ -37,6 +37,15 @@ class CADToRenderPipeline:
         print("📐 Parsing DXF...")
 
         structure = build_structure_from_dxf(self.input_path)
+
+        # ----------------------------------------------------
+        # 🔥 HARD SAFETY CHECK
+        # ----------------------------------------------------
+        if not isinstance(structure, BuildingStructure):
+            raise TypeError(
+                f"Expected BuildingStructure, got {type(structure)}. "
+                "Fix dxf_to_structure.py return value."
+            )
 
         mesh = build_mesh_from_structure(structure)
 

@@ -79,6 +79,7 @@ import ezdxf
 from pathlib import Path
 from typing import List, Dict
 
+
 # =========================
 # CONFIG
 # =========================
@@ -87,7 +88,6 @@ IGNORE_ENTITY_TYPES = {
     "TEXT", "MTEXT", "DIMENSION", "HATCH", "LEADER"
 }
 
-# Industry-style layer hints
 LAYER_KEYWORDS = {
     "wall": ["a-wall", "wall", "partition"],
     "door": ["a-door", "door"],
@@ -95,6 +95,7 @@ LAYER_KEYWORDS = {
     "floor": ["a-floor", "floor", "slab"],
     "furniture": ["a-furn", "furniture"],
 }
+
 
 # =========================
 # HELPERS
@@ -108,13 +109,43 @@ def infer_semantic_type(layer_name: str):
     return "unknown"
 
 
+def get_units_scale(doc):
+    """
+    Returns approximate scale to meters based on DXF units.
+    Does NOT assume anything if unitless.
+    """
+    units = doc.units
+
+    # DXF unit codes reference
+    # 0 = Unitless
+    # 1 = Inches
+    # 2 = Feet
+    # 4 = Millimeters
+    # 6 = Meters
+
+    if units == 1:      # inches
+        return 0.0254
+    elif units == 2:    # feet
+        return 0.3048
+    elif units == 4:    # millimeters
+        return 0.001
+    elif units == 6:    # meters
+        return 1.0
+    else:
+        # Unitless or unknown
+        return 1.0
+
+
 # =========================
 # MAIN PARSER
 # =========================
 
 def parse_dwg(file_path: Path) -> List[Dict]:
+
     doc = ezdxf.readfile(str(file_path))
     print("DXF Units:", doc.units)
+
+    scale = get_units_scale(doc)
 
     msp = doc.modelspace()
 
@@ -122,8 +153,8 @@ def parse_dwg(file_path: Path) -> List[Dict]:
     ignored = 0
     layers_seen = set()
 
-
     for e in msp:
+
         etype = e.dxftype()
 
         if etype in IGNORE_ENTITY_TYPES:
@@ -132,6 +163,7 @@ def parse_dwg(file_path: Path) -> List[Dict]:
 
         layer = e.dxf.layer.lower() if hasattr(e.dxf, "layer") else "default"
         semantic = infer_semantic_type(layer)
+
         if layer not in layers_seen:
             print("Layer detected:", layer)
             layers_seen.add(layer)
@@ -143,20 +175,45 @@ def parse_dwg(file_path: Path) -> List[Dict]:
             "confidence": 0.7 if semantic != "unknown" else 0.2
         }
 
-        # -------- LINE --------
+        # =====================================================
+        # LINE
+        # =====================================================
         if etype == "LINE":
+
+            try:
+                p1 = (
+                    float(e.dxf.start.x) * scale,
+                    float(e.dxf.start.y) * scale
+                )
+                p2 = (
+                    float(e.dxf.end.x) * scale,
+                    float(e.dxf.end.y) * scale
+                )
+            except Exception:
+                ignored += 1
+                continue
+
             base["geometry"] = {
                 "type": "line",
-                "points": [
-                    (float(e.dxf.start.x), float(e.dxf.start.y)),
-                    (float(e.dxf.end.x), float(e.dxf.end.y))
-                ]
+                "points": [p1, p2]
             }
+
             entities.append(base)
 
-        # -------- POLYLINE --------
-        elif etype in {"LWPOLYLINE", "POLYLINE"}:
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points()]
+        # =====================================================
+        # LWPOLYLINE (modern polyline)
+        # =====================================================
+        elif etype == "LWPOLYLINE":
+
+            try:
+                pts = [
+                    (float(p[0]) * scale, float(p[1]) * scale)
+                    for p in e.get_points()
+                ]
+            except Exception:
+                ignored += 1
+                continue
+
             if len(pts) < 2:
                 continue
 
@@ -165,11 +222,51 @@ def parse_dwg(file_path: Path) -> List[Dict]:
                 "points": pts,
                 "closed": bool(e.closed)
             }
+
             entities.append(base)
 
-        # -------- SPLINE --------
+        # =====================================================
+        # POLYLINE (old AutoCAD format)
+        # =====================================================
+        elif etype == "POLYLINE":
+
+            try:
+                pts = [
+                    (
+                        float(v.dxf.location.x) * scale,
+                        float(v.dxf.location.y) * scale
+                    )
+                    for v in e.vertices
+                ]
+            except Exception:
+                ignored += 1
+                continue
+
+            if len(pts) < 2:
+                continue
+
+            base["geometry"] = {
+                "type": "polyline",
+                "points": pts,
+                "closed": bool(e.is_closed)
+            }
+
+            entities.append(base)
+
+        # =====================================================
+        # SPLINE
+        # =====================================================
         elif etype == "SPLINE":
-            pts = [(float(p[0]), float(p[1])) for p in e.control_points]
+
+            try:
+                pts = [
+                    (float(p[0]) * scale, float(p[1]) * scale)
+                    for p in e.control_points
+                ]
+            except Exception:
+                ignored += 1
+                continue
+
             if len(pts) < 2:
                 continue
 
@@ -177,6 +274,7 @@ def parse_dwg(file_path: Path) -> List[Dict]:
                 "type": "spline",
                 "points": pts
             }
+
             entities.append(base)
 
         else:
@@ -184,5 +282,8 @@ def parse_dwg(file_path: Path) -> List[Dict]:
 
     print(f"✔ Parsed entities: {len(entities)}")
     print(f"✖ Ignored entities: {ignored}")
+    from collections import Counter
+    print("Entity breakdown:", Counter(e["entity_type"] for e in entities))
+
 
     return entities
